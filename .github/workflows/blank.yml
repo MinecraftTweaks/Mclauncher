@@ -1,0 +1,453 @@
+name: Build MiUIX Bedrock Launcher APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-android-apk:
+    name: MiUIX Bedrock APK Derle
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Depoyu İndir (Checkout)
+        uses: actions/checkout@v4
+
+      - name: Android Projesini Hazırla
+        run: |
+          mkdir -p app/src/main/java/io/miuix/bedrocklauncher
+          mkdir -p app/src/main/res/values
+
+          # 1. settings.gradle.kts
+          cat << 'EOF' > settings.gradle.kts
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "MiuixBedrockLauncher"
+          include(":app")
+          EOF
+
+          # 2. gradle.properties
+          cat << 'EOF' > gradle.properties
+          org.gradle.jvmargs=-Xmx3072m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          EOF
+
+          # 3. Kök build.gradle.kts
+          cat << 'EOF' > build.gradle.kts
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.20" apply false
+              id("org.jetbrains.kotlin.plugin.compose") version "2.0.20" apply false
+          }
+          EOF
+
+          # 4. app/build.gradle.kts
+          cat << 'EOF' > app/build.gradle.kts
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+              id("org.jetbrains.kotlin.plugin.compose")
+          }
+
+          android {
+              namespace = "io.miuix.bedrocklauncher"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "io.miuix.bedrocklauncher"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 102
+                  versionName = "1.2.0-HyperOS"
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                      signingConfig = signingConfigs.getByName("debug")
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+              buildFeatures {
+                  compose = true
+              }
+          }
+
+          dependencies {
+              val composeBom = platform("androidx.compose:compose-bom:2024.09.03")
+              implementation(composeBom)
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.ui:ui-graphics")
+              implementation("androidx.compose.foundation:foundation")
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.compose.animation:animation")
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("androidx.activity:activity-compose:1.9.2")
+              implementation("androidx.documentfile:documentfile:1.0.1")
+              implementation("androidx.browser:browser:1.8.0")
+          }
+          EOF
+
+          # 5. AndroidManifest.xml
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.KILL_BACKGROUND_PROCESSES" />
+              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+              <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+              <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
+              <queries>
+                  <package android:name="com.mojang.minecraftpe" />
+              </queries>
+
+              <application
+                  android:allowBackup="true"
+                  android:label="MiUIX Bedrock"
+                  android:supportsRtl="true"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|screenLayout|keyboardHidden">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.VIEW" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <category android:name="android.intent.category.BROWSABLE" />
+                          <data
+                              android:scheme="ms-xal-0000000048183522"
+                              android:host="auth" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          # 6. LicenseGuard.kt
+          cat << 'EOF' > app/src/main/java/io/miuix/bedrocklauncher/LicenseGuard.kt
+          package io.miuix.bedrocklauncher
+
+          import android.content.Context
+          import android.content.pm.ApplicationInfo
+          import android.content.pm.PackageInfo
+          import android.content.pm.PackageManager
+          import android.os.Build
+          import java.security.MessageDigest
+
+          object LicenseGuard {
+              const val MINECRAFT_PACKAGE = "com.mojang.minecraftpe"
+              private const val PLAY_STORE_INSTALLER = "com.android.vending"
+
+              data class VerificationResult(
+                  val isInstalled: Boolean,
+                  val isFromPlayStore: Boolean,
+                  val isDebuggableTampered: Boolean,
+                  val versionName: String,
+                  val signatureSha256: String,
+                  val isGenuine: Boolean,
+                  val statusMessage: String
+              )
+
+              fun verifyOriginalMinecraft(context: Context): VerificationResult {
+                  val pm = context.packageManager
+                  val pkgInfo: PackageInfo = try {
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                          pm.getPackageInfo(MINECRAFT_PACKAGE, PackageManager.GET_SIGNING_CERTIFICATES)
+                      } else {
+                          @Suppress("DEPRECATION")
+                          pm.getPackageInfo(MINECRAFT_PACKAGE, PackageManager.GET_SIGNATURES)
+                      }
+                  } catch (e: PackageManager.NameNotFoundException) {
+                      return VerificationResult(
+                          isInstalled = false,
+                          isFromPlayStore = false,
+                          isDebuggableTampered = false,
+                          versionName = "-",
+                          signatureSha256 = "-",
+                          isGenuine = false,
+                          statusMessage = "Orijinal Minecraft Bedrock bulunamadı. Lütfen oyunu Google Play'den yükleyin."
+                      )
+                  }
+
+                  val installerPackage: String? = try {
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                          pm.getInstallSourceInfo(MINECRAFT_PACKAGE).installingPackageName
+                      } else {
+                          @Suppress("DEPRECATION")
+                          pm.getInstallerPackageName(MINECRAFT_PACKAGE)
+                      }
+                  } catch (e: Exception) {
+                      null
+                  }
+
+                  val isFromPlay = installerPackage == PLAY_STORE_INSTALLER
+                  val isDebuggable = (pkgInfo.applicationInfo?.flags ?: 0) and ApplicationInfo.FLAG_DEBUGGABLE != 0
+                  val sigHash = extractSignatureSha256(pkgInfo)
+                  val genuine = isFromPlay && !isDebuggable && sigHash.isNotEmpty()
+                  val message = when {
+                      isDebuggable -> "Korsan / Modifiye APK tespit edildi."
+                      !isFromPlay -> "Korsan Koruması: Oyun Play Store dışından yüklenmiş."
+                      else -> "Orijinal Google Play Store lisansı doğrulandı (${pkgInfo.versionName})."
+                  }
+
+                  return VerificationResult(
+                      isInstalled = true,
+                      isFromPlayStore = isFromPlay,
+                      isDebuggableTampered = isDebuggable,
+                      versionName = pkgInfo.versionName ?: "1.21.x",
+                      signatureSha256 = sigHash,
+                      isGenuine = genuine,
+                      statusMessage = message
+                  )
+              }
+
+              private fun extractSignatureSha256(pkgInfo: PackageInfo): String {
+                  return try {
+                      val bytes = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                          pkgInfo.signingInfo?.apkContentsSigners?.firstOrNull()?.toByteArray()
+                      } else {
+                          @Suppress("DEPRECATION")
+                          pkgInfo.signatures?.firstOrNull()?.toByteArray()
+                      } ?: return ""
+                      val md = MessageDigest.getInstance("SHA-256")
+                      md.digest(bytes).joinToString(":") { "%02X".format(it) }.take(23) + "..."
+                  } catch (e: Exception) {
+                      ""
+                  }
+              }
+          }
+          EOF
+
+          # 7. A10sUltraOptimizer.kt
+          cat << 'EOF' > app/src/main/java/io/miuix/bedrocklauncher/A10sUltraOptimizer.kt
+          package io.miuix.bedrocklauncher
+
+          import android.app.ActivityManager
+          import android.content.Context
+          import java.io.File
+
+          object A10sUltraOptimizer {
+              const val OPTIONS_RELATIVE_PATH =
+                  "Android/data/com.mojang.minecraftpe/files/games/com.mojang/minecraftpe/options.txt"
+              const val COM_MOJANG_RELATIVE_PATH =
+                  "Android/data/com.mojang.minecraftpe/files/games/com.mojang"
+
+              data class OptimizationProfile(
+                  val name: String,
+                  val lock2ChunksReadOnly: Boolean = true,
+                  val viewDistanceBlocks: Int = 32,
+                  val frustumAndCaveCulling: Boolean = true,
+                  val blockFaceCullingPack: Boolean = true,
+                  val fov60FrustumNarrow: Boolean = true,
+                  val disableVsync: Boolean = true,
+                  val maxFramerate: Int = 60,
+                  val simpleGraphics: Boolean = true,
+                  val disableAllHeavyEffects: Boolean = true,
+                  val cleanLogsAndTelemetry: Boolean = true
+              )
+
+              val SAMSUNG_A10S_TURBO_PROFILE = OptimizationProfile(
+                  name = "Samsung A10s 2-Chunk Kilitli Ultra FPS"
+              )
+
+              fun buildOptionsTxtMap(profile: OptimizationProfile): Map<String, String> {
+                  val blocks = if (profile.lock2ChunksReadOnly) 32 else profile.viewDistanceBlocks
+                  return linkedMapOf(
+                      "gfx_vsync" to if (profile.disableVsync) "0" else "1",
+                      "gfx_max_framerate" to profile.maxFramerate.toString(),
+                      "gfx_viewdistance" to blocks.toString(),
+                      "gfx_field_of_view" to if (profile.fov60FrustumNarrow) "60" else "70",
+                      "gfx_fancygraphics" to if (profile.simpleGraphics) "0" else "1",
+                      "gfx_fancyleaves" to if (profile.disableAllHeavyEffects) "0" else "1",
+                      "gfx_fancybubbles" to if (profile.disableAllHeavyEffects) "0" else "1",
+                      "gfx_renderclouds" to if (profile.disableAllHeavyEffects) "0" else "1",
+                      "gfx_smoothlighting" to if (profile.disableAllHeavyEffects) "0" else "1",
+                      "gfx_beautifulskies" to if (profile.disableAllHeavyEffects) "0" else "1",
+                      "gfx_particleviewdistance" to if (profile.disableAllHeavyEffects) "0" else "1",
+                      "gfx_fov_alter_by_gameplay" to "0",
+                      "gfx_screenanimations" to "0",
+                      "gfx_msaa" to "1",
+                      "gfx_texel_aa" to "0",
+                      "gfx_bobview" to "0",
+                      "gfx_guiscale_offset" to "-1"
+                  )
+              }
+
+              fun applyToOptionsFile(optionsFile: File, profile: OptimizationProfile): String {
+                  val overrides = buildOptionsTxtMap(profile).toMutableMap()
+                  if (optionsFile.exists()) {
+                      optionsFile.setWritable(true)
+                  }
+                  val existingLines = if (optionsFile.exists()) optionsFile.readLines() else emptyList()
+                  val updatedLines = mutableListOf<String>()
+
+                  for (line in existingLines) {
+                      val idx = line.indexOf(':')
+                      if (idx > 0) {
+                          val key = line.substring(0, idx).trim()
+                          if (overrides.containsKey(key)) {
+                              updatedLines.add("$key:${overrides.remove(key)}")
+                          } else {
+                              updatedLines.add(line)
+                          }
+                      } else {
+                          updatedLines.add(line)
+                      }
+                  }
+                  for ((k, v) in overrides) {
+                      updatedLines.add("$k:$v")
+                  }
+
+                  val finalContent = updatedLines.joinToString("\n") + "\n"
+                  optionsFile.parentFile?.mkdirs()
+                  optionsFile.writeText(finalContent)
+                  if (profile.lock2ChunksReadOnly) {
+                      optionsFile.setReadOnly()
+                  }
+                  return finalContent
+              }
+
+              fun injectBlockCullingRulesPack(comMojangDir: File) {
+                  val packDir = File(comMojangDir, "development_resource_packs/miuix_ultra_culling/block_culling")
+                  packDir.mkdirs()
+                  File(packDir, "cull_hidden_faces.json").writeText(
+                      """
+                      {
+                        "format_version": "1.20.60",
+                        "minecraft:block_culling_rules": {
+                          "description": {
+                            "identifier": "miuix:cull_occluded_and_underground"
+                          },
+                          "rules": [
+                            { "direction": "north" },
+                            { "direction": "south" },
+                            { "direction": "east" },
+                            { "direction": "west" },
+                            { "direction": "up" },
+                            { "direction": "down" }
+                          ]
+                        }
+                      }
+                      """.trimIndent()
+                  )
+              }
+
+              fun cleanMojangTelemetryAndLogs(comMojangDir: File): Int {
+                  var deletedCount = 0
+                  val logsDir = File(comMojangDir, "logs")
+                  if (logsDir.exists() && logsDir.isDirectory) {
+                      logsDir.listFiles()?.forEach { file ->
+                          if (file.delete()) deletedCount++
+                      }
+                  }
+                  val telemetryFile = File(comMojangDir, "minecraftpe/telemetry_info.json")
+                  if (telemetryFile.exists() && telemetryFile.delete()) {
+                      deletedCount++
+                  }
+                  return deletedCount
+              }
+
+              fun freeBackgroundMemory(context: Context) {
+                  val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return
+                  Runtime.getRuntime().gc()
+                  am.runningAppProcesses?.forEach { proc ->
+                      if (proc.processName != context.packageName &&
+                          proc.processName != LicenseGuard.MINECRAFT_PACKAGE
+                      ) {
+                          try {
+                              am.killBackgroundProcesses(proc.processName)
+                          } catch (e: Exception) {
+                          }
+                      }
+                  }
+              }
+          }
+          EOF
+
+          # 8. MicrosoftXboxAuth.kt
+          cat << 'EOF' > app/src/main/java/io/miuix/bedrocklauncher/MicrosoftXboxAuth.kt
+          package io.miuix.bedrocklauncher
+
+          import android.content.Context
+          import android.net.Uri
+          import androidx.browser.customtabs.CustomTabsIntent
+          import java.util.UUID
+
+          object MicrosoftXboxAuth {
+              private const val CLIENT_ID = "0000000048183522"
+              private const val REDIRECT_URI = "ms-xal-0000000048183522://auth"
+              private const val OAUTH_AUTHORIZE_URL = "https://login.live.com/oauth20_authorize.srf"
+
+              fun startMicrosoftOAuthFlow(context: Context) {
+                  val state = UUID.randomUUID().toString()
+                  val authUri = Uri.parse(OAUTH_AUTHORIZE_URL).buildUpon()
+                      .appendQueryParameter("client_id", CLIENT_ID)
+                      .appendQueryParameter("response_type", "code")
+                      .appendQueryParameter("redirect_uri", REDIRECT_URI)
+                      .appendQueryParameter("scope", "service::user.auth.xboxlive.com::MBI_SSL")
+                      .appendQueryParameter("state", state)
+                      .build()
+
+                  CustomTabsIntent.Builder().setShowTitle(true).build().launchUrl(context, authUri)
+              }
+          }
+          EOF
+
+          # 9. MainActivity.kt
+          cat << 'EOF' > app/src/main/java/io/miuix/bedrocklauncher/MainActivity.kt
+          package io.miuix.bedrocklauncher
+
+          import android.content.Intent
+          import android.net.Uri
+          import android.os.Bundle
+          import android.os.Environment
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.setContent
+          import androidx.compose.animation.AnimatedContent
+          import androidx.compose.animation.core.Spring
+          import androidx.compose.animation.core.animateFloatAsState
+          import androidx.compose.animation.core.spring
+          import androidx.compose.animation.fadeIn
+          import androidx.compose.animation.fadeOut
+          import androidx.compose.animation.togetherWith
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.border
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.interaction.MutableInteractionSource
+          import androidx.compose.foundation.interaction.collectIsPressedAsState
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.foundation.verticalScroll
+          impo
